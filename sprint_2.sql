@@ -1,16 +1,84 @@
-### Сеть ресторанов Gastro Hub
+--ШАГ 1:
+create type cafe.restaurant_type as enum
+    ('coffee_shop', 'restaurant', 'bar', 'pizzeria');
 
-Необходимо на основе сырых, необработанных данных построить дополнительные таблицы, представления и материализованные представления, а также написать несколько аналитических запросов.  
+--ШАГ 2:
+create table if not exists cafe.restaurants (
+    restaurant_uuid uuid default gen_random_uuid(),
+    name varchar(50) not null,
+    location geometry not null,
+    type cafe.restaurant_type not null,
+    menu jsonb not null,
+    constraint pk_restaurants primary key (restaurant_uuid)
+);
 
-Базой для работы является дамп БД [cars.csv](https://github.com/msmkdenis/sql-practicum/blob/main/sprint_1/cars.csv)
+insert into cafe.restaurants
+    (name, location, type, menu)
+select
+    distinct s.cafe_name,
+             ST_SetSRID(st_point(s.longitude, s.latitude),4326),
+             s.type::cafe.restaurant_type,
+             m.menu
+from raw_data.sales s
+left join raw_data.menu m on s.cafe_name = m.cafe_name;
 
-Перед выполнением заданий необходимо создать ряд дополнительных таблиц и наполнить их данным.
-Ниже приведены решения аналитических задач, полный скрипт решений приведен в файле [cars.csv](https://github.com/msmkdenis/sql-practicum/blob/main/sprint_1/cars.csv)
+--ШАГ 3:
+create table if not exists cafe.managers (
+    manager_uuid uuid default gen_random_uuid(),
+    name varchar(50) not null,
+    phone varchar(50) not null,
+    constraint pk_managers primary key (manager_uuid)
+);
 
-#### Задание 1
-Создайте представление, которое покажет топ-3 заведений внутри каждого типа заведения по среднему чеку за все даты. 
-Столбец со средним чеком округлите до второго знака после запятой.
-```sql
+insert into cafe.managers
+    (name, phone)
+select
+    distinct manager,
+             manager_phone
+from raw_data.sales;
+
+--ШАГ 4:
+create table if not exists cafe.restaurant_manager_work_dates (
+    restaurant_uuid uuid not null,
+    manager_uuid uuid not null,
+    working_start_date date not null,
+    working_end_date date,
+    constraint pk_restaurant_manager_work_dates primary key (restaurant_uuid, manager_uuid),
+    constraint fk_restaurant foreign key (restaurant_uuid) references cafe.restaurants,
+    constraint fk_manager foreign key (manager_uuid) references cafe.managers
+);
+
+insert into cafe.restaurant_manager_work_dates
+    (restaurant_uuid, manager_uuid, working_start_date, working_end_date)
+select
+    r.restaurant_uuid as restaurant_uuid,
+    m.manager_uuid as manager_uuid,
+    min(report_date) as start_work,
+    max(report_date) as end_work
+from raw_data.sales as s
+         join cafe.restaurants as r on s.cafe_name = r.name
+         join cafe.managers as m on s.manager = m.name
+group by 1,2;
+
+--ШАГ 5:
+create table if not exists cafe.sales (
+    date date not null,
+    restaurant_uuid uuid not null,
+    avg_check numeric(6,2),
+    constraint pk_sales primary key (date, restaurant_uuid),
+    constraint fk_restaurant foreign key (restaurant_uuid) references cafe.restaurants
+);
+
+insert into cafe.sales
+    (date, restaurant_uuid, avg_check)
+select
+    rds.report_date,
+    cr.restaurant_uuid,
+    rds.avg_check
+from raw_data.sales rds
+    left join cafe.restaurants cr on rds.cafe_name = cr.name;
+
+--ЗАДАНИЕ 1
 create view cafe.top_3_cafe_per_type_by_average_check as
 with
     average_check as (
@@ -28,11 +96,8 @@ select
     average_check
 from average_check
 where rank in (1,2,3);
-```
-#### Задание 2
-Создайте материализованное представление, которое покажет, как изменяется средний чек для каждого заведения от года к году за все года за исключением 2023 года. 
-Все столбцы со средним чеком округлите до второго знака после запятой.
-```sql
+
+--ЗАДАНИЕ 2
 create materialized view cafe.average_check_change_per_cafe_year as
 with
     raw_check_per_year as(
@@ -59,10 +124,8 @@ select
     (((average_check_present_year - lag(average_check_present_year) over (partition by name))/
       lag(average_check_present_year) over (partition by name))*100)::numeric(6,2) as average_check_change
 from check_per_year;
-```
-#### Задание 3
-Найдите топ-3 заведения, где чаще всего менялся менеджер за весь период.
-```sql
+
+--ЗАДАНИЕ 3
 select
     r.name,
     count(rm.manager_uuid) as manager_change_times
@@ -71,10 +134,8 @@ from cafe.restaurant_manager_work_dates as rm
 group by r.name
 order by manager_change_times desc
 limit 3;
-```
-#### Задание 4
-Найдите пиццерию с самым большим количеством пицц в меню. Если таких пиццерий несколько, выведите все.
-```sql
+
+--ЗАДАНИЕ 4
 with
     pizzeria_list as (
         select
@@ -95,10 +156,8 @@ select
     pizzas_quantity_menu
 from pizzeria_list_rank
 where rank = 1;
-```
-#### Задание 5
-Найдите самую дорогую пиццу для каждой пиццерии.
-```sql
+
+--ЗАДАНИЕ 5
 with
     pizzeria_price as (
         select
@@ -119,10 +178,8 @@ select
     pr.price
 from price_rank pr
 where rank = 1;
-```
-#### Задание 6
-Найдите два самых близких друг к другу заведения одного типа.
-```sql
+
+--ЗАДАНИЕ 6
 select a.name as rest1,
        b.name as rest2,
        a.type as type,
@@ -133,11 +190,8 @@ where a.name::text <> b.name::text
 group by a.name, b.name, a.type
 order by (min(st_distance(a.location::geography, b.location::geography)))
 limit 1;
-```
-#### Задание 7
-Найдите район с самым большим количеством заведений и район с самым маленьким количеством заведений. 
-Первой строчкой выведите район с самым большим количеством заведений, второй — с самым маленьким.
-```sql
+
+--ЗАДАНИЕ 7
 with
     district_coverage as (
         select
@@ -174,4 +228,3 @@ select
     district_name,
     covers_true
 from min_coverage;
-```
